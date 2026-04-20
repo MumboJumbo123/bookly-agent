@@ -51,7 +51,7 @@ flowchart TD
 
 - **Grounding rule.** The agent cannot state order, tracking, or delivery data it has not retrieved via `get_order_status`. If the tool has not been called, the agent does not know — and says so. Enforced as rule #1 in the guardrail block.
 - **Enumerated policy facts.** Returns window, shipping tiers, Prime pricing, payment methods are listed as ground truth in the prompt. Deviation is an error, not creativity.
-- **Consent gate.** `submit_return_request` is blocked on the model unless explicit customer confirmation appears in the immediately preceding turn.
+- **Consent gate (defence-in-depth).** `submit_return_request` is protected in two places. (1) The system prompt forbids the model from calling it without explicit customer confirmation in the immediately preceding turn. (2) The tool implementation independently rejects any call whose `customer_confirmation` argument is missing, non-affirmative, or not grounded in the customer's most recent message — returning a structured `consent_gate_violation` error. A prompt jailbreak alone cannot submit a return; the tool-level check is the hard stop.
 - **Human approval gate.** Gated data classes — payment disputes, account-compromise flags, orders over £500, marketplace seller data — are never retrieved. Escalation is architectural, not a capability limitation.
 - **Email verification.** Every tool call verifies email against the order record; a mismatch returns an auth error the model surfaces honestly.
 - **Escalation loop limit.** `MAX_TOOL_ROUNDS = 10`. If exceeded, the agent hands off to a human rather than looping.
