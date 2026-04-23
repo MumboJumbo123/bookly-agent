@@ -1,6 +1,6 @@
 # Bookly AI Support Agent — Design Appendix
 
-Optional depth for `DESIGN.md`. Four items: AOP-02 sequence, priority discovery questions, training data strategy, production architecture, success metrics.
+Optional depth for `DESIGN.md`: AOP-02 sequence, priority discovery questions, training data strategy, production architecture, success metrics.
 
 ## 1. AOP-02 returns — conversation sequence
 

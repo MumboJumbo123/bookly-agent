@@ -4,3 +4,11 @@ __pycache__/
 .DS_Store
 .claude/
 pdf_export/
+
+# Local-only: Claude Code context, interview prep, demo scaffolding
+CLAUDE.md
+INTERVIEW_CHEATSHEET.md
+PREP_TASKS.md
+interview_prompter_map.md
+demo_narration.txt
+demo_paste_strings.txt
