@@ -11,7 +11,7 @@ The design doc renders best on GitHub — Mermaid diagrams (architecture, sequen
 - `DESIGN.md` — one-page design doc (primary deliverable)
 - `DESIGN_APPENDIX.md` — optional depth: AOP-02 sequence, crawl/walk/run, extended rationale
 - `agent.py` — single-agent prototype (Anthropic API, tool use, consent-gated return submission)
-- `test_transcripts.md` — four end-to-end flows including adversarial consent-bypass
+- `test_transcripts.md` — six end-to-end flows including adversarial consent-bypass
 - `README.md` — run instructions
 
 ## Fallback files (bundled in this upload)
