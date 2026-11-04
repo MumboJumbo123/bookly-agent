@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bookly agent replay</title>
+<meta name="description" content="Replays of an AI customer support agent's eval conversations: what the customer saw, and what the agent did under the hood.">
+<style>
+:root {
+  --bg: #faf8f5;
+  --panel: #ffffff;
+  --ink: #1f1d1a;
+  --muted: #6b665e;
+  --line: #e6e1d8;
+  --accent: #b85c3c;
+  --accent-soft: #f6e7e0;
+  --on-accent: #ffffff;
+  --customer: #2f4b7c;
+  --customer-ink: #ffffff;
+  --bea: #f1ede6;
+  --ok: #2e7d4f;
+  --ok-soft: #e3f2e8;
+  --warn: #a35f00;
+  --warn-soft: #fbefd9;
+  --bad: #b3261e;
+  --bad-soft: #fbe4e2;
+  --code: #f4f1ec;
+  --shadow: 0 1px 2px rgba(31, 29, 26, .06), 0 4px 16px rgba(31, 29, 26, .05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171614; --panel: #201f1c; --ink: #ece8e1; --muted: #a39d93; --line: #34322d;
+    --accent: #e08b6a; --accent-soft: #3a2a23; --on-accent: #1f1d1a; --customer: #4f6fa8; --customer-ink: #ffffff;
+    --bea: #2a2925; --ok: #6cc38f; --ok-soft: #1f3327; --warn: #e0a350; --warn-soft: #3a2f1c;
+    --bad: #f08b84; --bad-soft: #3d2221; --code: #262521; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171614; --panel: #201f1c; --ink: #ece8e1; --muted: #a39d93; --line: #34322d;
+  --accent: #e08b6a; --accent-soft: #3a2a23; --on-accent: #1f1d1a; --customer: #4f6fa8; --customer-ink: #ffffff;
+  --bea: #2a2925; --ok: #6cc38f; --ok-soft: #1f3327; --warn: #e0a350; --warn-soft: #3a2f1c;
+  --bad: #f08b84; --bad-soft: #3d2221; --code: #262521; --shadow: none;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+a { color: var(--accent); }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 32px 24px 64px; }
+header h1 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -.01em; }
+header p { margin: 0; color: var(--muted); max-width: 720px; }
+.links { margin-top: 12px; font-size: 14px; display: flex; gap: 16px; flex-wrap: wrap; }
+.banner {
+  margin: 20px 0 0; padding: 10px 14px; border-radius: 10px; font-size: 14px;
+  background: var(--warn-soft); color: var(--ink); border: 1px solid var(--line);
+}
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); }
+.stat b { display: block; font-size: 22px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 13px; color: var(--muted); }
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 16px; }
+.tab {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 999px;
+  padding: 7px 14px; font: inherit; font-size: 14px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center;
+}
+.tab[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.tab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.tab .dot.ok { background: var(--ok); } .tab .dot.bad { background: var(--bad); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+.scenario-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 16px; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; }
+.scenario-head h2 { font-size: 19px; margin: 0 0 4px; }
+.scenario-head p { margin: 0; color: var(--muted); font-size: 14px; max-width: 640px; }
+.controls { display: flex; gap: 8px; }
+.btn {
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px;
+  padding: 6px 12px; font: inherit; font-size: 14px; cursor: pointer; min-height: 36px;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn:focus-visible, .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cols-head { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 14px 20px 0; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.stream { display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; row-gap: 10px; padding: 12px 20px 20px; min-height: 240px; }
+.row { grid-column: 1; display: flex; animation: in .25s ease-out both; }
+.row.tool { grid-column: 2; }
+.row.customer { justify-content: flex-end; }
+@keyframes in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .row { animation: none; } }
+.bubble { max-width: 88%; padding: 10px 14px; border-radius: 16px; font-size: 15px; overflow-wrap: anywhere; }
+.customer .bubble { background: var(--customer); color: var(--customer-ink); border-bottom-right-radius: 4px; }
+.bea .bubble { background: var(--bea); border-bottom-left-radius: 4px; }
+.who { font-size: 12px; color: var(--muted); margin: 0 0 2px; }
+.customer .who { color: rgba(255,255,255,.75); }
+.toolcard { width: 100%; border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 10px; padding: 9px 12px; background: var(--bg); font-size: 14px; }
+.toolcard.ok { border-left-color: var(--ok); }
+.toolcard.blocked { border-left-color: var(--warn); background: var(--warn-soft); }
+.toolcard.error { border-left-color: var(--bad); }
+.toolcard .t { font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.toolcard .t code { font-weight: 400; font-size: 12px; color: var(--muted); }
+.toolcard .d { color: var(--ink); margin-top: 2px; }
+.toolcard details { margin-top: 6px; }
+.toolcard summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+pre { margin: 6px 0 0; padding: 8px 10px; background: var(--code); border-radius: 6px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.checks { padding: 16px 20px 20px; border-top: 1px solid var(--line); }
+.checks h3 { font-size: 15px; margin: 0 0 10px; }
+.checks ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.checks li { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: baseline; font-size: 14px; }
+.checks .detail { color: var(--muted); font-size: 13px; grid-column: 2 / 4; margin-top: -2px; }
+.kind { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; padding: 1px 8px; border-radius: 999px; background: var(--code); color: var(--muted); }
+.kind.safety { background: var(--accent-soft); color: var(--accent); }
+.empty { color: var(--muted); font-size: 14px; }
+footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+footer code { font-size: 12px; }
+@media (max-width: 760px) {
+  .wrap { padding: 24px 16px 48px; }
+  header h1 { font-size: 23px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cols-head { display: none; }
+  .tabs { flex-wrap: nowrap; overflow-x: auto; margin-left: -16px; margin-right: -16px; padding: 0 16px 4px; scrollbar-width: none; }
+  .tab { flex: none; }
+  .stream { grid-template-columns: 1fr; padding: 12px 14px 16px; }
+  .row.tool { grid-column: 1; padding: 0 8px; }
+  .bubble { max-width: 92%; }
+  .scenario-head { padding: 16px 14px; }
+  .checks { padding: 14px; }
+  .checks li { grid-template-columns: 22px 1fr; }
+  .checks li .kind { grid-column: 2; justify-self: start; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Bookly support agent</h1>
+    <p>An AI customer support agent for an online bookshop that's allowed to <em>act</em>: it processes returns end to end and hands risky cases to people. These are replays of its eval conversations: what the customer saw on the left, and what the agent did under the hood on the right.</p>
+    <div class="links">
+      <a href="https://github.com/MumboJumbo123/bookly-agent">Code on GitHub</a>
+      <a href="https://github.com/MumboJumbo123/bookly-agent/blob/main/DESIGN.md">Design doc</a>
+      <a href="https://github.com/MumboJumbo123/bookly-agent/tree/main/evals">How the evals work</a>
+    </div>
+    <div id="banner" class="banner" hidden></div>
+  </header>
+
+  <section class="stats" id="stats" aria-label="Run summary"></section>
+
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Scenarios"></nav>
+
+  <main class="card" id="scenario">
+    <p class="empty" style="padding:20px">Loading…</p>
+  </main>
+
+  <footer id="footer"></footer>
+</div>
+
+<script>
+(() => {
+  const DATA_URL = "data/latest-run.json";
+  const STEP_MS = 900;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let run = null, current = 0, steps = [], shown = 0, timer = null;
+
+  const $ = (sel) => document.querySelector(sel);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const md = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
+  const money = (x) => (x == null ? "–" : (x < 0.01 ? "<$0.01" : "$" + x.toFixed(3)));
+
+  function describeTool(name, input, result) {
+    const r = result || {};
+    const err = r.error;
+    if (name === "get_order_status") {
+      const title = `Order lookup · ${esc(input.order_id || "")}`;
+      if (err === "restricted_order") return { cls: "blocked", title, desc: `Restricted (${esc(r.category)}): details withheld from the model` };
+      if (err) return { cls: "error", title, desc: `${esc(err)}. Nothing about the order revealed` };
+      const n = (r.items || []).length;
+      return { cls: "", title, desc: `${esc(r.status)} · ${n} item${n === 1 ? "" : "s"}` };
+    }
+    if (name === "prepare_return") {
+      if (err === "restricted_order") return { cls: "blocked", title: "Return summary", desc: "Restricted order: refused, needs a human" };
+      if (err) return { cls: "error", title: "Return summary", desc: esc(err) };
+      return { cls: "ok", title: "Return summary prepared", desc: `Refund £${Number(r.refund_gbp).toFixed(2)}, worked out in code · waiting for the customer's yes` };
+    }
+    if (name === "submit_return_request") {
+      if (err === "consent_gate_violation") return { cls: "blocked", title: "Blocked by the consent gate", desc: esc(r.detail) };
+      if (err) return { cls: "error", title: "Submit return", desc: esc(err) };
+      return { cls: "ok", title: `Return submitted · ${esc(r.return_reference)}`, desc: r.already_submitted ? "Retry returned the original return; no duplicate"
+        : input.customer_confirmation ? `Confirmed by the customer: “${esc(input.customer_confirmation)}”` : "" };
+    }
+    if (name === "escalate_to_human") {
+      if (err) return { cls: "error", title: "Escalation", desc: esc(err) };
+      return { cls: "ok", title: `Ticket ${esc(r.ticket_id)} → ${esc(r.queue)}`, desc: `Expected response ${esc(r.expected_response)} · handoff: “${esc(input.summary || "")}”` };
+    }
+    return { cls: err ? "error" : "", title: esc(name), desc: err ? esc(err) : "" };
+  }
+
+  function buildSteps(sc) {
+    const out = [];
+    for (const turn of sc.turns) {
+      out.push({ type: "customer", text: turn.customer });
+      let call = null;
+      for (const ev of turn.events) {
+        if (ev.kind === "text") out.push({ type: "bea", text: ev.text });
+        else if (ev.kind === "tool_call") call = ev;
+        else if (ev.kind === "tool_result") {
+          out.push({ type: "tool", name: ev.name, input: call ? call.input : {}, result: ev.result });
+          call = null;
+        } else if (ev.kind === "notice") out.push({ type: "tool", name: "notice", input: {}, result: { error: ev.text } });
+      }
+    }
+    return out;
+  }
+
+  function stepHtml(s) {
+    if (s.type === "customer") return `<div class="row customer"><div class="bubble"><p class="who">Customer</p>${md(s.text)}</div></div>`;
+    if (s.type === "bea") return `<div class="row bea"><div class="bubble"><p class="who">Bea</p>${md(s.text)}</div></div>`;
+    const d = describeTool(s.name, s.input, s.result);
+    return `<div class="row tool"><div class="toolcard ${d.cls}">
+      <div class="t">${d.title} <code>${esc(s.name)}</code></div>
+      ${d.desc ? `<div class="d">${d.desc}</div>` : ""}
+      <details><summary>Raw call and result</summary><pre>${esc(JSON.stringify(s.input, null, 1))}\n→ ${esc(JSON.stringify(s.result, null, 1))}</pre></details>
+    </div></div>`;
+  }
+
+  function renderStream() {
+    $("#stream").innerHTML = steps.slice(0, shown).map(stepHtml).join("");
+    $("#play").textContent = timer ? "Pause" : (shown >= steps.length ? "Replay" : "Play");
+    $("#play").setAttribute("aria-pressed", timer ? "true" : "false");
+  }
+
+  function stop() { clearInterval(timer); timer = null; }
+  function play() {
+    if (shown >= steps.length) shown = 0;
+    stop();
+    timer = setInterval(() => {
+      shown++;
+      if (shown >= steps.length) stop();
+      renderStream();
+    }, STEP_MS);
+    shown++; renderStream();
+  }
+
+  function renderChecks(sc) {
+    if (!sc.checks || !sc.checks.length) return `<div class="checks"><p class="empty">Checks weren't run on this recording. Run <code>python3 evals/run_evals.py</code> to produce checked transcripts.</p></div>`;
+    const icon = (p) => (p === true ? "✅" : p === false ? "❌" : "➖");
+    return `<div class="checks"><h3>Checks</h3><ul>${sc.checks.map((c) => `
+      <li><span>${icon(c.passed)}</span><span>${esc(c.name)}</span><span class="kind ${esc(c.kind)}">${esc(c.kind)}</span>
+      <span class="detail">${esc(c.detail)}</span></li>`).join("")}</ul></div>`;
+  }
+
+  function select(i, autoplay) {
+    stop();
+    current = i;
+    const sc = run.scenarios[i];
+    document.querySelectorAll(".tab").forEach((t, j) => t.setAttribute("aria-selected", j === i ? "true" : "false"));
+    if (history.replaceState) history.replaceState(null, "", "#" + sc.id);
+    const m = sc.metrics || {};
+    const meta = [sc.aop, m.customer_turns ? `${m.customer_turns} customer turn${m.customer_turns === 1 ? "" : "s"}` : null,
+      m.agent_cost_usd != null ? `${money(m.agent_cost_usd)} model cost` : null].filter(Boolean).join(" · ");
+    $("#scenario").innerHTML = `
+      <div class="scenario-head">
+        <div><h2>${esc(sc.title)}</h2><p>${esc(sc.tests || "")}</p><p style="margin-top:6px">${esc(meta)}</p></div>
+        <div class="controls">
+          <button class="btn primary" id="play" type="button">Play</button>
+          <button class="btn" id="step" type="button">Step</button>
+          <button class="btn" id="all" type="button">Show all</button>
+        </div>
+      </div>
+      <div class="cols-head"><div>Customer ↔ Bea</div><div>Under the hood</div></div>
+      <div class="stream" id="stream" aria-live="polite"></div>
+      ${renderChecks(sc)}`;
+    steps = buildSteps(sc);
+    shown = (autoplay && !reduceMotion) ? 0 : steps.length;
+    $("#play").onclick = () => (timer ? (stop(), renderStream()) : play());
+    $("#step").onclick = () => { stop(); if (shown < steps.length) shown++; renderStream(); };
+    $("#all").onclick = () => { stop(); shown = steps.length; renderStream(); };
+    renderStream();
+    if (autoplay && !reduceMotion) play();
+  }
+
+  function renderStats() {
+    const s = run.summary;
+    const items = s ? [
+      [`${s.scenarios_passed}/${s.scenarios}`, "scenarios passed"],
+      [String(s.safety_failures), "safety failures"],
+      [money(s.avg_cost_per_conversation_usd), "model cost per conversation"],
+      [s.median_reply_seconds == null ? "–" : s.median_reply_seconds.toFixed(1) + "s", "median reply time"],
+    ] : [
+      [String(run.scenarios.length), "recorded conversations"],
+      ["–", "safety failures (not checked)"],
+      ["–", "model cost per conversation"],
+      ["–", "median reply time"],
+    ];
+    $("#stats").innerHTML = items.map(([b, t]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(t)}</span></div>`).join("");
+  }
+
+  function init(data) {
+    run = data;
+    if (run.note) { $("#banner").hidden = false; $("#banner").textContent = run.note; }
+    renderStats();
+    $("#tabs").innerHTML = run.scenarios.map((sc, i) => {
+      const cls = sc.checks && sc.checks.length ? (sc.passed ? "ok" : "bad") : "";
+      return `<button class="tab" role="tab" type="button" data-i="${i}"><span class="dot ${cls}"></span>${esc(sc.title)}</button>`;
+    }).join("");
+    document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => select(Number(t.dataset.i), true)));
+    const fromHash = run.scenarios.findIndex((sc) => "#" + sc.id === location.hash);
+    select(fromHash >= 0 ? fromHash : 0, true);
+    const bits = [`Agent model <code>${esc(run.model)}</code>`];
+    if (run.simulator_model) bits.push(`simulated customer <code>${esc(run.simulator_model)}</code>`);
+    if (run.generated_at) bits.push(`recorded ${esc(run.generated_at.slice(0, 10))}`);
+    if (run.git_commit) bits.push(`commit <code>${esc(run.git_commit)}</code>`);
+    $("#footer").innerHTML = bits.join(" · ") + `. Data: <a href="${DATA_URL}">${DATA_URL}</a>.`;
+  }
+
+  fetch(DATA_URL).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(init)
+    .catch(() => { $("#scenario").innerHTML = `<p class="empty" style="padding:20px">No run data yet. Run <code>python3 evals/run_evals.py</code> to generate <code>docs/data/latest-run.json</code>.</p>`; });
+})();
+</script>
+</body>
+</html>
