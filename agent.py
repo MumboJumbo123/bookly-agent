@@ -7,6 +7,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 import json
 import os
 import random
+import re
 import sys
 import time
 import traceback
@@ -19,8 +20,9 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-MODEL = "claude-sonnet-4-20250514"
-MAX_TOKENS = 2048
+# Override with BOOKLY_MODEL=<model id> to try a different Claude model.
+MODEL = os.environ.get("BOOKLY_MODEL", "claude-sonnet-5-5")
+MAX_TOKENS = 16000
 MAX_TOOL_ROUNDS = 10
 IS_TTY = sys.stdout.isatty()
 
@@ -109,19 +111,42 @@ def get_order_status(order_id: str, customer_email: str) -> dict:
 # Consent gate — defence-in-depth for submit_return_request.
 # The system prompt instructs the model never to submit without explicit
 # customer confirmation. This tool-level check is the second layer: even if
-# the prompt is jailbroken, the tool will refuse unless the confirmation
-# phrase the model passes is grounded in the customer's immediately
-# preceding message.
-_CONSENT_TOKENS = (
-    "yes", "yep", "yeah", "ok", "okay", "confirm", "confirmed",
-    "go ahead", "please do", "please submit", "submit it", "sounds good",
-    "that's right", "correct", "proceed",
+# the prompt is jailbroken, the tool refuses unless (a) the customer's most
+# recent message is an explicit, non-negated confirmation and (b) the
+# confirmation phrase the model passes is quoted from that message.
+#
+# Matching is whole-word, so "ok" does not match "book" and "correct" does
+# not match "incorrect". Any negation fails closed: a false "no" costs one
+# extra question, a false "yes" submits a return the customer didn't want.
+_CONSENT_PHRASES = (
+    "yes", "yep", "yeah", "yup", "sure", "ok", "okay", "confirm", "confirmed",
+    "go ahead", "please do", "do it", "please submit", "submit it",
+    "sounds good", "that's right", "correct", "proceed",
+)
+_NEGATIONS = (
+    "no", "not", "don't", "dont", "do not", "never", "cancel", "stop",
+    "wait", "hold on",
 )
 
 
+def _phrase_regex(phrases: tuple[str, ...]) -> re.Pattern:
+    return re.compile(r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")\b")
+
+
+_CONSENT_RE = _phrase_regex(_CONSENT_PHRASES)
+_NEGATION_RE = _phrase_regex(_NEGATIONS)
+
+
+def _normalise(text: str) -> str:
+    """Lowercase, straighten apostrophes, turn punctuation into spaces."""
+    t = text.lower().replace("\u2019", "'")
+    t = re.sub(r"[^a-z0-9' ]+", " ", t)
+    return " ".join(t.split())
+
+
 def _is_consent_phrase(text: str) -> bool:
-    t = text.strip().lower()
-    return any(tok in t for tok in _CONSENT_TOKENS)
+    t = _normalise(text)
+    return bool(_CONSENT_RE.search(t)) and not _NEGATION_RE.search(t)
 
 
 def submit_return_request(
@@ -144,13 +169,21 @@ def submit_return_request(
                 "be called."
             ),
         }
-    if _last_user_text and not _is_consent_phrase(_last_user_text):
+    if not _is_consent_phrase(_last_user_text):
         return {
             "error": "consent_gate_violation",
             "detail": (
                 "The customer's most recent message does not contain an "
                 "explicit confirmation. Ask the customer clearly, wait for "
                 "a yes, then retry."
+            ),
+        }
+    if _normalise(customer_confirmation) not in _normalise(_last_user_text):
+        return {
+            "error": "consent_gate_violation",
+            "detail": (
+                "customer_confirmation must be quoted from the customer's "
+                "most recent message. Pass their confirming words verbatim."
             ),
         }
 
@@ -422,6 +455,11 @@ def run_agent_turn(client: anthropic.Anthropic, history: list[dict]) -> None:
 
         # Unexpected stop reason — append and return
         history.append({"role": "assistant", "content": assistant_content})
+        if response.stop_reason == "refusal":
+            print(f"\n{_bold('Bea:')} I can't help with that one here. "
+                  "Let me connect you with a human agent.")
+        elif not text_blocks:
+            print(_dim(f"  [stopped: {response.stop_reason}]"))
         return
 
     # Hit max iterations
