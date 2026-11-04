@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline:
+    name: Offline tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -r requirements.txt pyflakes
+      - name: Lint
+        run: python -m pyflakes agent.py test_tools.py evals/
+      - name: Tool and consent-gate tests
+        run: python test_tools.py
+      - name: Eval harness tests
+        run: python evals/test_harness.py
