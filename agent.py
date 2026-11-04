@@ -32,6 +32,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Override with BOOKLY_MODEL=<model id> to try a different Claude model.
 MODEL = os.environ.get("BOOKLY_MODEL", "claude-sonnet-5-5")
+# How hard the model thinks before replying: low | medium | high. Support chat
+# needs quick replies more than deep reasoning; set BOOKLY_EFFORT="" to use the
+# model's default.
+EFFORT = os.environ.get("BOOKLY_EFFORT", "medium")
 MAX_TOKENS = 16000
 MAX_TOOL_ROUNDS = 10
 IS_TTY = sys.stdout.isatty()
@@ -576,6 +580,7 @@ def run_agent_turn(client: anthropic.Anthropic, session: Session, emit: Emit) ->
                 system=SYSTEM_PROMPT,
                 tools=TOOLS,
                 messages=session.history,
+                **({"output_config": {"effort": EFFORT}} if EFFORT else {}),
             )
         except anthropic.APIConnectionError:
             emit("notice", text="I'm having trouble connecting right now. Please try again in a moment.")
