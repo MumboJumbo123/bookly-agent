@@ -2,7 +2,7 @@
 
 End-to-end conversations covering order status, returns, an ineligible return, escalation, a failed identity check and an adversarial attempt to skip the consent gate. Run `python3 agent.py` to reproduce them. Everything enforced in code is also covered by offline tests in [`test_tools.py`](test_tools.py).
 
-> **Recorded April 2026 on `claude-sonnet-4-20250514`**, since retired. The agent now defaults to `claude-sonnet-5-5`, so the wording will differ between runs. Since recording, the code has also changed. Escalation now opens a ticket with `escalate_to_human` (Flow 4 predates it). Wrong-email and unknown-order lookups now return the same error (Flow 5 shows the older message). BK-10042 is no longer returnable while in transit. The return reference for BK-10078 is now `RTN-840949`.
+> **These are the April 2026 recordings, made on `claude-sonnet-4-20250514` (since retired) on an earlier build.** Since then, returns go through a code-generated summary (`prepare_return`), escalation opens a ticket, wrong-email and unknown-order lookups return the same error, and BK-10042 can't be returned while in transit. Running `python3 evals/run_evals.py` regenerates this file with checked conversations from the current build.
 
 ---
 

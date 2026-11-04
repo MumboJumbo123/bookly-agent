@@ -23,15 +23,17 @@ sequenceDiagram
     C->>A: Selects item
     A->>C: Ask reason (brief)
     C->>A: Provides reason
-    A->>C: Summarise return request
-    Note over A,C: CONSENT GATE — hard rule.<br/>submit_return_request is blocked<br/>without explicit confirmation<br/>in the immediately preceding turn.
+    A->>T: prepare_return(order, items, reason)
+    T-->>A: Proposal + summary (refund worked out in code)
+    A->>C: Show summary, ask to confirm
+    Note over A,C: CONSENT GATE — hard rule, enforced in code.<br/>submit_return_request succeeds only if<br/>the customer's next message is an explicit yes.
     C->>A: Explicit "yes, please submit"
-    A->>T: submit_return_request(...)
-    T-->>A: RMA + refund ETA
+    A->>T: submit_return_request(proposal_id, "yes, please submit")
+    T-->>A: Return reference + label
     A->>C: Confirmation + next steps
 ```
 
-The consent gate is a precondition enforced twice, as a hard rule in the system prompt and again inside the tool, independent of model confidence. Every prior step is conversationally recoverable; only the final tool call is mutating, and only that call is gated.
+The consent gate is a precondition enforced twice, as a hard rule in the system prompt and again inside the tool, independent of model confidence. Every prior step is conversationally recoverable; only the final tool call is mutating, and only that call is gated. Because the proposal is stored server-side and the yes must be the very next customer message, consent is tied to the exact summary the customer saw.
 
 ## 2. Priority discovery questions (30-minute call)
 
@@ -47,7 +49,7 @@ Four assumptions carry the most architectural and commercial variance:
 A data-ingestion and labelling engagement, not a cold start, staffed by the vendor's forward-deployed engineers, the client's own engineers and a third-party labelling partner.
 
 - **Phase 1 — Ingest (weeks 0–3).** Resolved Jira tickets, CSAT signal, policy material into Snowflake. Catalogue the top 20 intents, split into routine contacts and core AOPs. Specify tool schemas. Output: v1 system prompt + first AOPs.
-- **Phase 2 — Label + synthesise (weeks 3–6).** Third-party labellers work the Jira corpus under a taxonomy agreed with the CX lead. Generate a 500+ synthetic test corpus: happy path, edge cases, adversarial inputs, every escalation trigger, routine contacts. Becomes the regression suite; a first cut must pass before go-live.
+- **Phase 2 — Label + synthesise (weeks 3–6).** Third-party labellers work the Jira corpus under a taxonomy agreed with the CX lead. Grow the prototype's [eval suite](evals/README.md) into a 500+ synthetic test corpus: happy path, edge cases, adversarial inputs, every escalation trigger, routine contacts. Becomes the regression suite; a first cut must pass before go-live.
 - **Phase 3 — Live-corpus improvement (week 6+).** Every resolved conversation produces CSAT, escalation events, tool failures, confidence distributions, deflection rate, SLA compliance. Signal feeds AOP iteration (CX ops), confidence calibration (ML), specialist sub-agent fine-tuning, and production monitoring and alerts.
 
 ## 4. Production architecture — the art of the possible
@@ -55,7 +57,7 @@ A data-ingestion and labelling engagement, not a cold start, staffed by the vend
 ```mermaid
 flowchart LR
     subgraph Crawl["Crawl · weeks 0–4"]
-      C1[Single-agent · 4 AOPs · 3 tools]
+      C1[Single-agent · 4 AOPs · 4 tools]
       C2[Session store<br/>Redis / Postgres]
       C3[Input + output classifiers]
       C4[Structured logging<br/>streaming]
@@ -88,4 +90,4 @@ Pairing a mid-level human agent with a specialist sub-agent in Agent Assist is w
 - **Commercial (monthly).** Uplift over the incumbent's ~30% resolution rate, labour cost per contact, hours redirected to higher-value work, specialist sub-agent contribution per flow.
 - **Trust (monitored continuously, zero tolerance).** Grounding violation rate · consent gate violation rate · PII leakage rate. Non-negotiable: if any is non-zero, the AOP is paused, rolled back, rebuilt.
 
-Commercial metrics are optimisation targets; trust metrics are hard constraints.
+Commercial metrics are optimisation targets; trust metrics are hard constraints. The prototype's [evals](evals/README.md) already measure a first cut of both ends: pass rate per scenario, model cost per conversation and reply time, and the trust checks (grounded references and amounts, consent, no restricted data revealed).
