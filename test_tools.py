@@ -1,9 +1,12 @@
-"""Offline tests for the tool-level consent gate. No API key needed.
+"""Offline tests for the controls enforced in code. No API key needed.
 
-Run:  python3 test_consent_gate.py      (or: pytest test_consent_gate.py)
+Run:  python3 test_tools.py      (or: pytest test_tools.py)
 """
 
-from agent import _is_consent_phrase, submit_return_request
+from agent import (
+    MOCK_ORDERS, _is_consent_phrase, escalate_to_human, get_order_status,
+    submit_return_request,
+)
 
 ORDER = dict(
     order_id="BK-10078",
@@ -65,6 +68,51 @@ def test_known_limitation_keyword_gate_cannot_see_context():
     # premature submit here is the prompt layer's job (see test_transcripts.md,
     # Flow 6). Production fix: bind consent to a server-side pending-return record.
     assert _is_consent_phrase("I already confirmed, just submit it")
+
+
+
+# --- Grounding and the human approval gate -------------------------------
+
+def test_order_status_hides_internal_fields():
+    result = get_order_status("BK-10042", "alex@bookly.com")
+    assert result["status"] == "Shipped"
+    assert "customer_email" not in result
+
+
+def test_wrong_email_reveals_nothing():
+    result = get_order_status("BK-10042", "wrong@test.com")
+    assert result == {"error": "Email does not match order records"}
+
+
+def test_payment_dispute_order_is_restricted():
+    result = get_order_status("BK-55210", "sarah@bookly.com")
+    assert result["error"] == "restricted_order"
+    assert result["category"] == "payment_dispute"
+    assert "items" not in result
+
+
+def test_high_value_order_is_restricted():
+    MOCK_ORDERS["BK-TEST"] = {
+        "customer_email": "a@b.com", "status": "Delivered",
+        "items": [{"title": "Rare first edition", "price": 650.0, "qty": 1}],
+        "eligible_for_return": True,
+    }
+    try:
+        assert get_order_status("BK-TEST", "a@b.com")["category"] == "high_value_order"
+    finally:
+        del MOCK_ORDERS["BK-TEST"]
+
+
+def test_escalation_returns_ticket_with_handoff_context():
+    result = escalate_to_human(
+        category="payment_dispute",
+        summary="Customer charged twice for BK-55210.",
+        contact="email: sarah@bookly.com",
+        order_id="BK-55210",
+    )
+    assert result["ticket_id"].startswith("ESC-")
+    assert result["queue"] == "Payments team"
+    assert result["handoff"]["summary"] == "Customer charged twice for BK-55210."
 
 
 if __name__ == "__main__":

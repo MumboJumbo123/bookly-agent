@@ -1,6 +1,6 @@
 # Bookly Agent — Test Transcripts
 
-These transcripts verify AOP behaviour across six flows: five core AOP paths plus one adversarial consent-bypass attempt. Run `python3 agent.py` to reproduce them. The deterministic part of the consent gate is also covered by offline unit tests in [`test_consent_gate.py`](test_consent_gate.py).
+These transcripts verify AOP behaviour across six flows: five core AOP paths plus one adversarial consent-bypass attempt. Run `python3 agent.py` to reproduce them. The deterministic part of the consent gate is also covered by offline unit tests in [`test_tools.py`](test_tools.py).
 
 > **Captured April 2026 on `claude-sonnet-4-20250514`.** That model has since been retired, and the agent now defaults to `claude-sonnet-5-5`, so the wording will vary between runs. The tool calls, gating and escalation behaviour are what these flows test. The return reference in Flows 2 and 6 (`RTN-565536`) also differs from what the current code produces for this order (`RTN-840949`).
 

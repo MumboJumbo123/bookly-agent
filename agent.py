@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Bookly AI Support Agent — Bea (demo mode)."""
 
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
 import json
 import os
 import random
 import re
 import sys
-import time
 import traceback
 
 from dotenv import load_dotenv
@@ -76,7 +72,6 @@ MOCK_ORDERS = {
         ],
         "eligible_for_return": True,
         "payment_dispute_flag": True,
-        "high_value": True,
     },
 }
 
@@ -101,11 +96,60 @@ _CUSTOMER_FACING_FIELDS = {
 }
 
 
+# Human approval gate, enforced in code: orders in a restricted data class
+# are never returned to the model, whatever the prompt says.
+HIGH_VALUE_THRESHOLD_GBP = 500
+
+
+def _restricted_reason(order: dict) -> str | None:
+    if order.get("payment_dispute_flag"):
+        return "payment_dispute"
+    if order.get("account_compromise_flag"):
+        return "account_security"
+    if sum(i["price"] * i["qty"] for i in order["items"]) > HIGH_VALUE_THRESHOLD_GBP:
+        return "high_value_order"
+    return None
+
+
 def get_order_status(order_id: str, customer_email: str) -> dict:
     order, err = _verify_order(order_id, customer_email)
     if err:
         return err
+    reason = _restricted_reason(order)
+    if reason:
+        return {
+            "error": "restricted_order",
+            "category": reason,
+            "detail": "This order needs a human specialist. Do not discuss its "
+                      "details; escalate with escalate_to_human.",
+        }
     return {k: v for k, v in order.items() if k in _CUSTOMER_FACING_FIELDS}
+
+
+_ESCALATION_QUEUES = {
+    "payment_dispute": ("Payments team", "within 2 hours"),
+    "account_security": ("Account security team", "within 1 hour"),
+    "high_value_order": ("Senior support", "within 4 hours"),
+    "seller_dispute": ("Marketplace team", "within 1 business day"),
+    "customer_request": ("Customer support", "within 4 hours"),
+    "other": ("Customer support", "within 4 hours"),
+}
+
+
+def escalate_to_human(
+    category: str, summary: str, contact: str, order_id: str = ""
+) -> dict:
+    """Mock handoff: in production this would open a ticket in the helpdesk."""
+    queue, response_time = _ESCALATION_QUEUES.get(category, _ESCALATION_QUEUES["other"])
+    ticket = f"ESC-{random.Random(summary + contact).randint(10000, 99999)}"
+    return {
+        "success": True,
+        "ticket_id": ticket,
+        "queue": queue,
+        "expected_response": response_time,
+        "handoff": {"category": category, "order_id": order_id or None,
+                    "summary": summary, "contact": contact},
+    }
 
 
 # Consent gate — defence-in-depth for submit_return_request.
@@ -207,6 +251,7 @@ def submit_return_request(
 TOOL_DISPATCH = {
     "get_order_status": get_order_status,
     "submit_return_request": submit_return_request,
+    "escalate_to_human": escalate_to_human,
 }
 
 
@@ -279,10 +324,37 @@ TOOLS = [
                 "customer_confirmation",
             ],
         },
-        # Cache breakpoint: system prompt + both tool schemas are stable,
-        # so marking the last tool with cache_control reuses the full prefix
-        # across turns and tool rounds.
-        "cache_control": {"type": "ephemeral"},
+    },
+    {
+        "name": "escalate_to_human",
+        "description": (
+            "Hand the conversation to a human specialist by opening a ticket. "
+            "Use for payment disputes, account security, restricted orders, "
+            "seller disputes, explicit requests for a human, or anything you "
+            "cannot resolve. Call it once you have the customer's preferred "
+            "contact method. The summary must let the specialist act without "
+            "asking the customer to repeat themselves."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": list(_ESCALATION_QUEUES),
+                    "description": "Which specialist queue this belongs in",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Two or three sentences: what happened, what the customer wants, anything already checked",
+                },
+                "contact": {
+                    "type": "string",
+                    "description": "The customer's preferred contact method and details, as they gave them",
+                },
+                "order_id": {"type": "string", "description": "Related order ID, if any"},
+            },
+            "required": ["category", "summary", "contact"],
+        },
     },
 ]
 
@@ -327,8 +399,8 @@ Policy facts (ground truth — do not deviate):
 Rule: do not improvise beyond these facts. If a question falls outside, say so and offer a human specialist.
 
 ## AOP-04 — Escalation
-Trigger: payment dispute, account compromise, high-value order dispute, customer distress, explicit request for human, repeated tool failure.
-Behaviour: do NOT attempt to resolve. Do NOT call get_order_status or any other tool on the affected order — information access is itself gated. Acknowledge the limitation clearly, explain you're escalating to a specialist, collect best contact method.
+Trigger: payment dispute, account compromise, high-value order dispute, customer distress, explicit request for human, repeated tool failure, or get_order_status returning restricted_order.
+Behaviour: do NOT attempt to resolve. Do NOT call get_order_status on the affected order — information access is itself gated. Acknowledge the limitation clearly, explain you're escalating to a specialist, and ask for their preferred contact method. Then call escalate_to_human with a summary the specialist can act on, and tell the customer the ticket ID, which team has it, and when to expect contact — only as returned by the tool.
 If customer asks for a human at any point: escalate immediately. Do not try to resolve first.
 
 ## Human approval gate
@@ -343,10 +415,9 @@ Payment disputes, account compromise flags, orders over £500, marketplace selle
 6. If asked about non-Bookly topics — decline politely, redirect.\
 """
 
-# Prompt caching — the system prompt and tool schemas are stable across every
-# turn and every tool round, so marking them as cache_control=ephemeral lets
-# the API re-use the prefix. On a multi-turn return flow this cuts input
-# tokens on cached blocks by ~90%.
+# Prompt caching — tools and the system prompt are identical on every request,
+# so one breakpoint at the end of the system prompt caches both (the cached
+# prefix is tools → system). Cached input tokens bill at ~10% of the normal rate.
 SYSTEM_PROMPT = [
     {
         "type": "text",
@@ -361,8 +432,10 @@ SYSTEM_PROMPT = [
 
 def run_agent_turn(client: anthropic.Anthropic, history: list[dict]) -> None:
     """Run one full agent turn (may include multiple tool-use rounds)."""
-    for round_num in range(MAX_TOOL_ROUNDS):
+    for _ in range(MAX_TOOL_ROUNDS):
         try:
+            # The SDK already retries connection errors, 429s and 5xx with
+            # backoff, so anything that reaches here has failed for good.
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
@@ -371,38 +444,16 @@ def run_agent_turn(client: anthropic.Anthropic, history: list[dict]) -> None:
                 messages=history,
             )
         except anthropic.APIConnectionError:
-            print(_dim("Connection error — let me try again."))
-            time.sleep(1)
-            try:
-                response = client.messages.create(
-                    model=MODEL,
-                    max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
-                    tools=TOOLS,
-                    messages=history,
-                )
-            except Exception:
-                print("I'm having trouble connecting right now. Please try again in a moment.")
-                return
-        except anthropic.RateLimitError:
-            print(_dim("Bear with me, high load."))
-            time.sleep(2)
-            try:
-                response = client.messages.create(
-                    model=MODEL,
-                    max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
-                    tools=TOOLS,
-                    messages=history,
-                )
-            except Exception:
-                print("Still experiencing high load. Please try again shortly.")
-                return
-        except anthropic.APIStatusError as e:
-            print(f"Something went wrong on my end. I'll connect you to a human agent.")
-            print(_dim(f"[API error: {e.status_code}]"), file=sys.stderr)
+            print("I'm having trouble connecting right now. Please try again in a moment.")
             return
-        except Exception as e:
+        except anthropic.RateLimitError:
+            print("We're very busy right now. Please try again shortly.")
+            return
+        except anthropic.APIStatusError as e:
+            print("Something went wrong on my end. I'll connect you to a human agent.")
+            print(_dim(f"[API error {e.status_code}: {e.message}]"), file=sys.stderr)
+            return
+        except Exception:
             print("An unexpected error occurred. Let me connect you to a human agent.")
             traceback.print_exc(file=sys.stderr)
             return
@@ -478,7 +529,7 @@ def main():
         print("Copy .env.example to .env and add your key, or export it directly.")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, max_retries=3)
     history: list[dict] = []
 
     print(f"\n{_bold('Bookly Support — Bea')} · demo mode")

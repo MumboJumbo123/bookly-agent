@@ -73,7 +73,7 @@ flowchart LR
 |---|---|---|
 | Identity check | Ask for order ID + email first | `_verify_order` rejects mismatched emails without leaking order data |
 | Grounding | Never state order data not returned by a tool | `get_order_status` returns only customer-facing fields |
-| Consent gate | AOP-02 step 5: summarise, wait for a clear yes | `submit_return_request` rejects calls without a grounded, non-negated yes ([tests](test_consent_gate.py)) |
+| Consent gate | AOP-02 step 5: summarise, wait for a clear yes | `submit_return_request` rejects calls without a grounded, non-negated yes ([tests](test_tools.py)) |
 | Gated data (payment disputes, account compromise, orders over £500) | AOP-04: don't look it up, escalate | Prompt-only in this prototype. In production this belongs at the API/permissions layer. |
 
 ---
@@ -95,7 +95,7 @@ Type `/reset` to clear history, and `/exit` or Ctrl+D to quit. The agent uses `c
 The consent-gate tests run offline, with no API key:
 
 ```bash
-python3 test_consent_gate.py
+python3 test_tools.py
 ```
 
 ### Try these
@@ -121,7 +121,7 @@ Mock orders are built into [`agent.py`](agent.py):
 | [`DESIGN_APPENDIX.md`](DESIGN_APPENDIX.md) | Returns sequence diagram, discovery questions, training data, rollout, metrics |
 | [`agent.py`](agent.py) | The agent: system prompt, tool schemas, mock data, tool-use loop (single file, about 500 lines) |
 | [`test_transcripts.md`](test_transcripts.md) | Six end-to-end flows with notes on what each one shows |
-| [`test_consent_gate.py`](test_consent_gate.py) | Offline unit tests for the tool-level consent gate |
+| [`test_tools.py`](test_tools.py) | Offline unit tests for the tool-level consent gate |
 
 ---
 
