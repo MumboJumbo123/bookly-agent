@@ -167,7 +167,12 @@ footer code { font-size: 12px; }
 
   const $ = (sel) => document.querySelector(sel);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const md = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
+  // Model text is escaped first; only then are bold, bullets and http(s) links added.
+  const md = (s) => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/^\s*[-*] /gm, "• ")
+    .replace(/\bhttps?:\/\/[^\s<]+[^\s<.,;:!?)]/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`)
+    .replace(/\n/g, "<br>");
   const money = (x) => (x == null ? "–" : (x < 0.01 ? "<$0.01" : "$" + x.toFixed(3)));
 
   function describeTool(name, input, result) {

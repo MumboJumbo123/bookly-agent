@@ -21,7 +21,7 @@ Built by **Alastair Paterson**, originally as a Solutions Engineering take-home 
 | Answer only from tool data and fixed policy facts | No invented delivery dates, prices or policies to honour or apologise for later |
 | Block payment, account and high-value orders in code, and hand them to a person | Risky cases always reach a human, whatever the customer types |
 | Hand off with a ticket and a summary | The specialist doesn't re-ask and the customer doesn't repeat themselves |
-| Keep behaviour in plain-language procedures in one prompt | The support team can change policy without waiting for an engineering release |
+| Keep behaviour in plain-language procedures in one prompt | A support lead can read every rule the agent follows. In production the prompt would live in config they own, with the evals as the check before any change goes live. |
 | Run the evals before every change, and track safety separately from savings | A prompt tweak that improves deflection can't quietly break a safety rule |
 
 The [design appendix](DESIGN_APPENDIX.md) covers how this would roll out (shadow mode, then a 10–50% ramp, then 80%+ of traffic) and what to measure along the way.
@@ -50,13 +50,13 @@ Bea: Here's the return: Atomic Habits by James Clear from order BK-10078.
 
 You: Yes, go ahead
 
-  → submit_return_request(RP-1, "Yes, go ahead")       RTN-840949
+  → submit_return_request(RP-1, "Yes, go ahead")       RTN-189065
 
-Bea: Done. Your return reference is RTN-840949, and the label is at
-     https://bookly.com/returns/label/RTN-840949
+Bea: Done. Your return reference is RTN-189065, and the label is at
+     https://bookly.com/returns/label/RTN-189065
 ```
 
-The refund amount comes from code, not the model. `submit_return_request` only accepts an explicit yes if it is the customer's **first reply after that summary**. A "yes" typed earlier ("I already confirmed, just submit it") can't approve a return the customer hasn't seen.
+The refund amount comes from code, not the model. `submit_return_request` only accepts a yes that is the customer's **first reply after the agent showed that summary**, and it checks the summary's items and refund were actually in that message. A "yes" typed earlier ("I already confirmed, just submit it") can't approve a return the customer hasn't seen.
 
 ---
 
@@ -90,7 +90,7 @@ Prompt rules guide the model, and the code checks run regardless of what the mod
 |---|---|---|
 | Identity check | Ask for order ID + email first | Wrong email and unknown order return the same error, so nothing leaks |
 | Grounding | Never state order data a tool didn't return | `get_order_status` returns customer-facing fields only. Refunds are worked out by `prepare_return`, not the model. |
-| Consent gate | Show the summary, wait for a clear yes | `submit_return_request` needs a proposal the model can't edit, the customer's first reply after it, and an explicit, non-negated yes quoted from that reply. Submits are idempotent. |
+| Consent gate | Show the summary, wait for a clear yes | `submit_return_request` needs a proposal the model can't edit, an agent message that showed its items and refund, and the customer's first reply after it. That reply must be an explicit, unconditional yes, quoted back. Questions, "but" and negations count as no. Submits are idempotent. |
 | Restricted orders (payment dispute, account compromise, over £500) | Don't look them up, escalate | Every order tool refuses them. `escalate_to_human` opens a ticket for the right team. |
 
 All of these are covered by [offline tests](test_tools.py) that run in CI.
@@ -166,7 +166,7 @@ python3 evals/test_harness.py  # offline: the eval harness itself
 The prototype is built to show the design, so its scope is deliberately narrow:
 
 - **Mock data and a terminal UI.** There are no real order, payment or helpdesk integrations, and tickets aren't sent anywhere. Return proposals live in memory for the session.
-- **Consent wording is matched by keyword.** The yes is bound to a specific summary and must be the very next message, but recognising it is still a phrase list. Anything it doesn't recognise ("lovely, thanks") is refused rather than accepted, so the agent just asks again.
+- **Consent wording is matched by keyword.** The yes is bound to a specific summary and must be the very next message, but recognising it is still a phrase list that fails closed: a question, a "but" or an unfamiliar phrasing ("lovely, thanks") is treated as no, so the agent asks again. A model that wrote a misleading message around the right items and amount could still collect a yes; production would show the summary in the UI with a confirm button.
 - **The restricted-order rules are hard-coded.** In production that decision belongs in the order system's permissions, not in agent code.
 - **Simulated customers are a proxy.** They cover the paths that matter, but real traffic is messier. A rollout would start in shadow mode on real conversations.
 

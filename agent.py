@@ -204,12 +204,41 @@ def escalate_to_human(
 
 # --- Returns: prepare, then submit ----------------------------------------
 #
-# A return takes two tool calls. prepare_return validates the request,
-# works out the refund in code and stores a proposal the model can't edit.
-# The agent shows the customer that summary. submit_return_request then
-# succeeds only if the customer's very next message is an explicit yes, so
-# a "yes" can't be borrowed from earlier in the chat or typed before the
-# customer has seen what they're agreeing to.
+# A return takes two tool calls. prepare_return validates the request, works
+# out the refund in code and stores a proposal the model can't edit. The
+# agent shows the customer that summary. submit_return_request then succeeds
+# only if:
+#   - the proposal is the latest one, and the only one prepared that turn;
+#   - the agent's last message before the customer's reply actually showed
+#     it (the items and the refund amount);
+#   - the customer's reply is their first message since, and an explicit,
+#     unconditional yes (no question, no "but", no negation).
+# So a "yes" can't be borrowed from earlier in the chat, given to a different
+# summary, or typed before the customer has seen what they're agreeing to.
+
+def _short_title(title: str) -> str:
+    return title.split(" by ")[0].strip()
+
+
+def _match_items(order: dict, wanted: list[str]) -> tuple[list[dict], list[str]]:
+    """Map requested titles to order lines. A request must name one item unambiguously."""
+    matched, unknown = [], []
+    for w in wanted:
+        key = _normalise(w)
+        hits = [i for i in order["items"]
+                if key in (_normalise(i["title"]), _normalise(_short_title(i["title"])))
+                or (len(key) >= 4 and _normalise(_short_title(i["title"])).startswith(key))]
+        if len(hits) != 1:
+            unknown.append(w)
+        elif hits[0] not in matched:
+            matched.append(hits[0])
+    return matched, unknown
+
+
+def _already_returned(session: Session, order_id: str) -> set[str]:
+    return {t for p in session.proposals.values()
+            if p["order_id"] == order_id and p["status"] == "submitted" for t in p["items"]}
+
 
 def prepare_return(
     order_id: str, customer_email: str, items: list[str], reason: str,
@@ -218,6 +247,7 @@ def prepare_return(
     order, err = _verify_order(order_id, customer_email)
     if err:
         return err
+    order_id = order_id.strip().upper()
     restricted = _restricted_reason(order)
     if restricted:
         return _restricted_error(restricted)
@@ -227,23 +257,19 @@ def prepare_return(
             "reason": order.get("ineligibility_reason", "Unknown"),
         }
 
-    matched, unknown = [], []
-    for wanted in items:
-        hit = next((i for i in order["items"]
-                    if wanted.strip() and wanted.strip().lower() in i["title"].lower()), None)
-        if hit is None:
-            unknown.append(wanted)
-        elif hit not in matched:
-            matched.append(hit)
+    matched, unknown = _match_items(order, items)
     if not matched or unknown:
         return {"error": "Items not found on this order", "unknown_items": unknown,
                 "order_items": [i["title"] for i in order["items"]]}
+    done = _already_returned(session, order_id) & {i["title"] for i in matched}
+    if done:
+        return {"error": "Already returned in this conversation", "items": sorted(done)}
 
     refund = round(sum(i["price"] * i["qty"] for i in matched), 2)
     titles = [i["title"] for i in matched]
     proposal_id = f"RP-{len(session.proposals) + 1}"
     session.proposals[proposal_id] = {
-        "order_id": order_id.strip().upper(),
+        "order_id": order_id,
         "items": titles,
         "reason": reason,
         "refund_gbp": refund,
@@ -254,22 +280,24 @@ def prepare_return(
     return {
         "proposal_id": proposal_id,
         "summary": (
-            f"Return {' and '.join(titles)} from order {order_id.strip().upper()}. "
+            f"Return {' and '.join(titles)} from order {order_id}. "
             f"Reason: {reason}. You'll get a prepaid label to print; drop the "
             f"parcel at any Post Office. Refund: £{refund:.2f} to your original "
             f"payment method within 5 business days of us receiving it."
         ),
         "refund_gbp": refund,
         "next_step": (
-            "Show this summary to the customer and ask them to confirm. Call "
-            "submit_return_request only if their reply is an explicit yes."
+            "Show this summary to the customer, including the items and the "
+            "refund amount, and ask them to confirm. Call submit_return_request "
+            "only if their reply is an explicit yes."
         ),
     }
 
 
 # Consent matching is whole-word, so "ok" doesn't match "book" and "correct"
-# doesn't match "incorrect". Any negation fails closed: a false "no" costs one
-# extra question; a false "yes" sends a refund nobody asked for.
+# doesn't match "incorrect". It fails closed: a negation, a "but" or a
+# question means no. A false "no" costs one extra question; a false "yes"
+# sends a refund nobody asked for.
 _CONSENT_PHRASES = (
     "yes", "yep", "yeah", "yup", "sure", "ok", "okay", "confirm", "confirmed",
     "go ahead", "please do", "do it", "please submit", "submit it",
@@ -277,8 +305,10 @@ _CONSENT_PHRASES = (
 )
 _NEGATIONS = (
     "no", "not", "don't", "dont", "do not", "never", "cancel", "stop",
-    "wait", "hold on",
+    "wait", "hold on", "but", "instead", "actually",
 )
+# Harmless phrases that contain a negation word.
+_BENIGN = ("no rush", "no worries", "no problem", "not a problem")
 
 
 def _phrase_regex(phrases: tuple[str, ...]) -> re.Pattern:
@@ -287,22 +317,49 @@ def _phrase_regex(phrases: tuple[str, ...]) -> re.Pattern:
 
 _CONSENT_RE = _phrase_regex(_CONSENT_PHRASES)
 _NEGATION_RE = _phrase_regex(_NEGATIONS)
+_BENIGN_RE = _phrase_regex(_BENIGN)
 
 
 def _normalise(text: str) -> str:
     """Lowercase, straighten apostrophes, turn punctuation into spaces."""
-    t = text.lower().replace("’", "'")
+    t = text.lower().replace("\u2019", "'")
     t = re.sub(r"[^a-z0-9' ]+", " ", t)
     return " ".join(t.split())
 
 
 def _is_consent_phrase(text: str) -> bool:
-    t = _normalise(text)
+    if "?" in text:
+        return False
+    t = _BENIGN_RE.sub(" ", _normalise(text))
     return bool(_CONSENT_RE.search(t)) and not _NEGATION_RE.search(t)
 
 
-def _gate_violation(detail: str) -> dict:
-    return {"error": "consent_gate_violation", "detail": detail}
+def _block_text(block) -> str:
+    kind = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+    if kind != "text":
+        return ""
+    return block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+
+
+def _agent_text_before_latest_reply(session: Session) -> str:
+    """What the agent said to the customer between their last two messages."""
+    out, seen_latest = [], False
+    for msg in reversed(session.history):
+        is_customer = msg.get("role") == "user" and isinstance(msg.get("content"), str)
+        if is_customer:
+            if seen_latest:
+                break
+            seen_latest = True
+            continue
+        if seen_latest and msg.get("role") == "assistant":
+            content = msg.get("content")
+            blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+            out.append("\n".join(_block_text(b) for b in blocks))
+    return "\n".join(reversed(out))
+
+
+def _gate_violation(reason: str, detail: str) -> dict:
+    return {"error": "consent_gate_violation", "reason": reason, "detail": detail}
 
 
 def submit_return_request(
@@ -315,32 +372,51 @@ def submit_return_request(
         # Idempotent: a retried call returns the original result, not a second return.
         return {**proposal["result"], "already_submitted": True}
     if proposal_id != session.latest_proposal_id:
-        return _gate_violation(
+        return _gate_violation("superseded",
             f"{proposal_id} has been replaced by {session.latest_proposal_id}. "
             "Confirm the latest summary with the customer.")
+    same_turn = [p for p in session.proposals.values()
+                 if p["created_at_turn"] == proposal["created_at_turn"]]
+    if len(same_turn) > 1:
+        return _gate_violation("ambiguous",
+            "More than one return summary was prepared before the customer replied, "
+            "so it isn't clear which one they agreed to. Call prepare_return once "
+            "and confirm that summary.")
 
     turns_since = session.customer_turns - proposal["created_at_turn"]
     if turns_since == 0:
-        return _gate_violation(
+        return _gate_violation("no_reply_yet",
             "The customer hasn't replied to this summary yet. Show it to them "
             "and wait for their answer before submitting.")
     if turns_since > 1:
-        return _gate_violation(
+        return _gate_violation("stale",
             "The conversation has moved on since this summary was shown. Call "
             "prepare_return again and get a fresh confirmation.")
 
+    shown = _agent_text_before_latest_reply(session)
+    amount = f"£{proposal['refund_gbp']:.2f}"
+    missing = [x for x in [amount] + [_short_title(t) for t in proposal["items"]]
+               if x.lower() not in shown.lower()]
+    if missing:
+        return _gate_violation("not_shown",
+            f"The customer wasn't shown this summary (missing: {', '.join(missing)}). "
+            "Call prepare_return again, show the customer the items and refund "
+            "amount, and ask them to confirm.")
+
     latest = session.latest_customer_message
     if not _is_consent_phrase(latest):
-        return _gate_violation(
-            "The customer's most recent message does not contain an explicit "
-            "confirmation. Ask the customer clearly, wait for a yes, then retry.")
+        return _gate_violation("not_consent",
+            "The customer's reply to the summary isn't an explicit, unconditional "
+            "yes, so this summary can't be submitted. Answer them; if they still "
+            "want the return, call prepare_return again and confirm the new summary.")
     if not _is_consent_phrase(customer_confirmation) or \
             _normalise(customer_confirmation) not in _normalise(latest):
-        return _gate_violation(
+        return _gate_violation("not_quoted",
             "customer_confirmation must be quoted from the customer's most "
             "recent message. Pass their confirming words verbatim.")
 
-    ref = f"RTN-{random.Random(proposal['order_id']).randint(100000, 999999)}"
+    seed = proposal["order_id"] + "|" + "|".join(proposal["items"])
+    ref = f"RTN-{random.Random(seed).randint(100000, 999999)}"
     result = {
         "success": True,
         "return_reference": ref,
@@ -469,6 +545,16 @@ TOOLS = [
 # System prompt
 # ---------------------------------------------------------------------------
 
+# The policy facts the agent may state. The evals read this too: any £ amount
+# the agent quotes must come from here or from a tool result.
+POLICY_FACTS = """\
+- Returns: 30 days from delivery, unused, original packaging. Damaged/incorrect items: no time limit. Refunds: 5 business days after we receive the item, to the original payment method. Drop-off: print the prepaid label and take the parcel to any Post Office. Digital products non-returnable once downloaded.
+- Shipping: standard 3–5 days, free over £20 else £2.99. Express next day if ordered before 2pm, £4.99. EU from £6.99, 5–10 days. Click & Collect free, 2,400+ UK locations.
+- Bookly Prime: £7.99/month or £79/year. Free express delivery, early sale access, 10% member pricing. Cancel anytime.
+- Password reset: bookly.com/reset.
+- Payment: Visa, Mastercard, Amex, PayPal, Apple Pay, Google Pay, Bookly Gift Cards.\
+"""
+
 _SYSTEM_PROMPT_TEXT = """\
 You are Bea, the AI customer support agent for Bookly — a large-scale online bookstore and marketplace operating across the UK and Europe.
 
@@ -489,20 +575,16 @@ Sequence (one question at a time, never bulleted):
 1. Verify identity via get_order_status (order ID + email).
 2. If multiple items, ask which to return.
 3. Ask the reason briefly.
-4. Call prepare_return. Show the customer the summary it returns, with the refund amount exactly as returned, and ask: "Shall I go ahead and submit the return?"
+4. Call prepare_return once. Show the customer the summary it returns, with the items and the refund amount exactly as returned, and ask: "Shall I go ahead and submit the return?"
 5. CONSENT GATE: wait for the customer's reply. Only if it is a clear yes, call submit_return_request with the proposal_id and the customer's confirming words, verbatim, as customer_confirmation.
-Rule: NEVER call submit_return_request in the same turn as prepare_return, or unless the customer's latest message explicitly confirms the summary. Earlier claims of consent ("I already said yes") don't count. Model confidence is irrelevant — this is a hard rule, and the system enforces it: the yes must be the customer's first reply after the summary. If the customer changes anything, call prepare_return again and re-confirm.
+Rule: NEVER call submit_return_request in the same turn as prepare_return, or unless the customer's latest message explicitly confirms the summary. Earlier claims of consent ("I already said yes") don't count. Model confidence is irrelevant — this is a hard rule, and the system enforces it: the yes must be the customer's first reply after the summary. If the customer changes anything, asks a question or adds a condition, answer them, then call prepare_return again and re-confirm.
 Never state a refund amount yourself; use the one prepare_return returns.
 If ineligible: explain specifically why, offer human handoff if there's an extenuating circumstance.
 
 ## AOP-03 — Policy Q&A
 Trigger: question about shipping, returns policy, membership, payment methods, account.
 Policy facts (ground truth — do not deviate):
-- Returns: 30 days from delivery, unused, original packaging. Damaged/incorrect items: no time limit. Refunds: 5 business days after we receive the item, to the original payment method. Drop-off: print the prepaid label and take the parcel to any Post Office. Digital products non-returnable once downloaded.
-- Shipping: standard 3–5 days, free over £20 else £2.99. Express next day if ordered before 2pm, £4.99. EU from £6.99, 5–10 days. Click & Collect free, 2,400+ UK locations.
-- Bookly Prime: £7.99/month or £79/year. Free express delivery, early sale access, 10% member pricing. Cancel anytime.
-- Password reset: bookly.com/reset.
-- Payment: Visa, Mastercard, Amex, PayPal, Apple Pay, Google Pay, Bookly Gift Cards.
+{policy_facts}
 Rule: do not improvise beyond these facts. If a question falls outside, say so and offer a human specialist.
 
 ## AOP-04 — Escalation
@@ -520,7 +602,7 @@ Payment disputes, account compromise flags, orders over £500, marketplace selle
 4. Never attempt to access payment or account-compromise data.
 5. Never loop on an unresolvable issue — escalate once, clearly, and hold.
 6. If asked about non-Bookly topics — decline politely, redirect.\
-"""
+""".replace("{policy_facts}", POLICY_FACTS)
 
 # Prompt caching — tools and the system prompt are identical on every request,
 # so one breakpoint at the end of the system prompt caches both (the cached
@@ -542,7 +624,7 @@ SYSTEM_PROMPT = [
 #   tool_call    — name, input
 #   tool_result  — name, result, is_error
 #   api_call     — usage (dict of token counts), latency_s
-#   notice       — operational messages (API errors, unusual stop reasons)
+#   notice       — operational messages; error=True when the API call failed
 
 Emit = Callable[..., None]
 
@@ -583,17 +665,17 @@ def run_agent_turn(client: anthropic.Anthropic, session: Session, emit: Emit) ->
                 **({"output_config": {"effort": EFFORT}} if EFFORT else {}),
             )
         except anthropic.APIConnectionError:
-            emit("notice", text="I'm having trouble connecting right now. Please try again in a moment.")
+            emit("notice", error=True, text="I'm having trouble connecting right now. Please try again in a moment.")
             return
         except anthropic.RateLimitError:
-            emit("notice", text="We're very busy right now. Please try again shortly.")
+            emit("notice", error=True, text="We're very busy right now. Please try again shortly.")
             return
         except anthropic.APIStatusError as e:
-            emit("notice", text="Sorry, something went wrong on my end. Please try again in a moment.",
+            emit("notice", error=True, text="Sorry, something went wrong on my end. Please try again in a moment.",
                  detail=f"API error {e.status_code}: {e.message}")
             return
         except Exception:
-            emit("notice", text="Sorry, something unexpected went wrong. Please try again in a moment.",
+            emit("notice", error=True, text="Sorry, something unexpected went wrong. Please try again in a moment.",
                  detail=traceback.format_exc())
             return
         emit("api_call", usage=_usage_dict(response.usage),
@@ -623,16 +705,26 @@ def run_agent_turn(client: anthropic.Anthropic, session: Session, emit: Emit) ->
             continue
 
         if response.stop_reason == "refusal":
-            emit("text", scripted=True,
-                 text="I can't help with that one here, but I can pass it to a "
-                      "human specialist if you'd like.")
+            # A refused turn can be empty, and an empty assistant message
+            # would make every later request in this session fail. Replace
+            # it with the fixed reply the customer actually sees.
+            session.history.pop()
+            _say_scripted(session, emit,
+                          "I can't help with that one here, but I can pass it to a "
+                          "human specialist if you'd like.")
         elif response.stop_reason != "end_turn":
             emit("notice", text=f"stopped: {response.stop_reason}")
         return
 
-    emit("text", scripted=True,
-         text="I've been going back and forth a bit too much here. Would you "
-              "like me to pass this to a human specialist?")
+    _say_scripted(session, emit,
+                  "I've been going back and forth a bit too much here. Would you "
+                  "like me to pass this to a human specialist?")
+
+
+def _say_scripted(session: Session, emit: Emit, text: str) -> None:
+    """Fixed fallback copy: shown to the customer and kept in history so the model knows."""
+    session.history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+    emit("text", text=text, scripted=True)
 
 # ---------------------------------------------------------------------------
 # CLI

@@ -24,6 +24,11 @@ def _short(obj, limit: int = 220) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _cell(text) -> str:
+    """Make text safe for a Markdown table cell."""
+    return " ".join(str(text).split()).replace("|", "\\|")
+
+
 def render_transcript(scenario: dict) -> str:
     lines = []
     for turn in scenario["turns"]:
@@ -52,9 +57,12 @@ def _meta_line(run: dict) -> str:
 
 
 def _headline(s: dict) -> str:
-    return (f"**{s['scenarios_passed']}/{s['scenarios']} scenarios passed**, "
+    text = (f"**{s['scenarios_passed']}/{s['scenarios']} scenarios passed**, "
             f"{s['checks_passed']}/{s['checks_total']} checks, "
             f"{s['safety_failures']} safety failures")
+    if s.get("errored"):
+        text += f", {s['errored']} scenario run(s) hit an API error"
+    return text
 
 
 def scorecard_table(run: dict, link_prefix: str = "") -> str:
@@ -107,11 +115,12 @@ def render_markdown(run: dict) -> str:
             "",
             f"**What it tests:** {sc['tests']}",
             "",
+            *([f"> **This scenario didn't finish:** {_cell(sc['error'])}", ""] if sc.get("error") else []),
             "| | Check | Kind | Detail |",
             "|:-:|---|---|---|",
         ]
         for c in sc["checks"]:
-            out.append(f"| {ICON[c['passed']]} | {c['name']} | {c['kind']} | {c['detail']} |")
+            out.append(f"| {ICON[c['passed']]} | {_cell(c['name'])} | {c['kind']} | {_cell(c['detail'])} |")
         out += [
             "",
             "```text",
@@ -121,7 +130,7 @@ def render_markdown(run: dict) -> str:
             f"{m['customer_turns']} customer turns · {m['api_calls']} model calls · "
             f"{m['tool_calls']} tool calls · model cost {_money(m['agent_cost_usd'])} · "
             f"median reply {_secs(m['median_reply_seconds'])} · ended: "
-            f"{'customer was done' if sc['ended'] == 'customer_done' else 'turn limit'}",
+            f"{ {'customer_done': 'customer was done', 'turn_limit': 'turn limit', 'error': 'error'}[sc['ended']] }",
             "",
         ]
     return "\n".join(out)

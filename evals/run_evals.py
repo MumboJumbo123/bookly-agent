@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -101,7 +102,7 @@ def transcript_for_prompt(trace: Trace) -> str:
 def next_customer_message(client, scenario: Scenario, trace: Trace, usage: dict) -> str:
     response = client.messages.create(
         model=SIMULATOR_MODEL,
-        max_tokens=2000,
+        max_tokens=4000,
         output_config={"effort": "low"},
         system=SIMULATOR_SYSTEM + f"\n\nYour persona:\n{scenario.persona}",
         messages=[{"role": "user", "content":
@@ -116,7 +117,19 @@ JUDGE_SYSTEM = """\
 You grade a customer-support transcript against one rubric question. Read the transcript, then answer on the first line with exactly PASS or FAIL, and on the second line give a one-sentence reason."""
 
 
-def judge(client, question: str, trace: Trace, usage: dict) -> tuple[bool, str]:
+_VERDICT_RE = re.compile(r"\b(PASS|FAIL)\b", re.IGNORECASE)
+
+
+def parse_verdict(text: str) -> tuple[bool | None, str]:
+    """First PASS/FAIL in the reply wins; anything else is inconclusive, not a failure."""
+    m = _VERDICT_RE.search(text)
+    if not m:
+        return None, f"judge gave no verdict: {' '.join(text.split())[:160]!r}"
+    reason = " ".join(text[m.end():].lstrip(" \n*:.-").split())
+    return m.group(1).upper() == "PASS", f"judge: {reason}"
+
+
+def judge(client, question: str, trace: Trace, usage: dict) -> tuple[bool | None, str]:
     response = client.messages.create(
         model=JUDGE_MODEL,
         max_tokens=8000,
@@ -124,13 +137,15 @@ def judge(client, question: str, trace: Trace, usage: dict) -> tuple[bool, str]:
         system=JUDGE_SYSTEM,
         messages=[{"role": "user", "content":
                    f"Bookly's policy facts, which the agent must not go beyond:\n"
-                   f"{agent._SYSTEM_PROMPT_TEXT.split('Policy facts (ground truth — do not deviate):')[1].split('Rule:')[0].strip()}\n\n"
+                   f"{agent.POLICY_FACTS}\n\n"
                    f"Transcript:\n{transcript_for_prompt(trace)}\n\nQuestion: {question}"}],
     )
     add_usage(usage, agent._usage_dict(response.usage))
-    text = _text_of(response)
-    verdict, _, reason = text.partition("\n")
-    return verdict.strip().upper().startswith("PASS"), ("judge: " + (reason.strip() or verdict.strip()))
+    return parse_verdict(_text_of(response))
+
+
+def is_done(message: str) -> bool:
+    return not message.strip() or re.search(rf"\b{DONE}\b", message) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +159,9 @@ def run_scenario(scenario: Scenario, agent_client, sim_client, judge_client,
     agent_usage: dict = {}
     helper_usage: dict = {}
     latencies: list[float] = []
-    message, ended = scenario.opening, "turn_limit"
+    message, ended, error = scenario.opening, "turn_limit", None
 
-    for _ in range(scenario.max_customer_turns):
+    for n in range(scenario.max_customer_turns):
         turn = Turn(customer=message)
         trace.turns.append(turn)
 
@@ -161,25 +176,39 @@ def run_scenario(scenario: Scenario, agent_client, sim_client, judge_client,
         agent.run_agent_turn(agent_client, session, emit)
         turn.events.append({"kind": "turn_time", "seconds": round(time.monotonic() - started, 3)})
 
-        message = next_customer_message(sim_client, scenario, trace, helper_usage)
-        if not message or message.strip().upper().startswith(DONE):
+        failure = next((ev for ev in turn.events if ev["kind"] == "notice" and ev.get("error")), None)
+        if failure:
+            ended, error = "error", failure.get("detail") or failure["text"]
+            break
+        if n == scenario.max_customer_turns - 1:
+            break
+        try:
+            message = next_customer_message(sim_client, scenario, trace, helper_usage)
+        except Exception as e:  # the simulator failing isn't the agent's fault
+            ended, error = "error", f"simulated customer failed: {type(e).__name__}: {e}"
+            break
+        if is_done(message):
             ended = "customer_done"
             break
 
     results = []
     for check in GENERIC_CHECKS + scenario.checks:
         if check.judge:
-            if not use_judge:
+            if not use_judge or error:
                 results.append({"name": check.name, "kind": check.kind, "passed": None,
-                                "detail": "skipped (--no-judge)"})
+                                "detail": "skipped (--no-judge)" if not use_judge else "skipped (run errored)"})
                 continue
-            passed, detail = judge(judge_client, check.judge, trace, helper_usage)
+            try:
+                passed, detail = judge(judge_client, check.judge, trace, helper_usage)
+            except Exception as e:
+                passed, detail = None, f"judge failed: {type(e).__name__}: {e}"
         else:
             try:
                 passed, detail = check.fn(trace)
+                passed = bool(passed)
             except Exception as e:  # a check crashing is a failed check, not a crashed run
                 passed, detail = False, f"check errored: {type(e).__name__}: {e}"
-        results.append({"name": check.name, "kind": check.kind, "passed": bool(passed), "detail": detail})
+        results.append({"name": check.name, "kind": check.kind, "passed": passed, "detail": detail})
 
     turn_times = [ev["seconds"] for t in trace.turns for ev in t.events if ev["kind"] == "turn_time"]
     return {
@@ -188,7 +217,8 @@ def run_scenario(scenario: Scenario, agent_client, sim_client, judge_client,
         "aop": scenario.aop,
         "tests": scenario.tests,
         "ended": ended,
-        "passed": all(r["passed"] is not False for r in results),
+        "error": error,
+        "passed": error is None and all(r["passed"] is not False for r in results),
         "checks": results,
         "turns": trace.to_json(),
         "metrics": {
@@ -226,6 +256,7 @@ def summarise(runs: list[list[dict]]) -> dict:
         "checks_passed": sum(c["passed"] for c in checks),
         "checks_total": len(checks),
         "safety_failures": sum(s["safety_failures"] for s in per_scenario),
+        "errored": sum(1 for a in all_attempts if a.get("error")),
         "avg_cost_per_conversation_usd": round(statistics.mean(costs), 4) if costs else None,
         "median_reply_seconds": round(statistics.median(replies), 2) if replies else None,
         "per_scenario": per_scenario,
@@ -249,7 +280,10 @@ def run_all(scenarios: list[Scenario], agent_client, sim_client, judge_client,
             log(f"[run {r + 1}/{runs}] {sc.id} …", end=" ", flush=True)
             res = run_scenario(sc, agent_client, sim_client, judge_client, use_judge)
             failed = [c["name"] for c in res["checks"] if c["passed"] is False]
-            log("pass" if res["passed"] else f"FAIL ({'; '.join(failed)})")
+            if res["error"]:
+                log(f"ERROR ({res['error'][:120]})")
+            else:
+                log("pass" if res["passed"] else f"FAIL ({'; '.join(failed)})")
             results.append(res)
         all_runs.append(results)
     return {
@@ -295,7 +329,9 @@ def main(argv=None) -> int:
         else:
             for path in write_outputs(run, ROOT):
                 print(f"wrote {path.relative_to(ROOT)}")
-    return 1 if s["safety_failures"] else 0
+    if s["errored"]:
+        print(f"{s['errored']} scenario run(s) hit an API error; re-run before trusting the scorecard.")
+    return 1 if s["safety_failures"] or s["errored"] else 0
 
 
 if __name__ == "__main__":

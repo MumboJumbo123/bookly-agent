@@ -33,7 +33,7 @@ sequenceDiagram
     A->>C: Confirmation + next steps
 ```
 
-The consent gate is a precondition enforced twice, as a hard rule in the system prompt and again inside the tool, independent of model confidence. Every prior step is conversationally recoverable; only the final tool call is mutating, and only that call is gated. Because the proposal is stored server-side and the yes must be the very next customer message, consent is tied to the exact summary the customer saw.
+The consent gate is a precondition enforced twice, as a hard rule in the system prompt and again inside the tool, independent of model confidence. Every prior step is conversationally recoverable; only the final tool call is mutating, and only that call is gated. Because the proposal is stored server-side, the agent's message must show its items and refund, and the yes must be the very next customer message, consent is tied to the summary the agent showed.
 
 ## 2. Priority discovery questions (30-minute call)
 

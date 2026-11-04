@@ -30,7 +30,7 @@ Most checks are plain code over the recorded tool calls and replies, so they're 
 
 Each scenario then adds its own checks. Examples: *the refund amount was shown before the customer confirmed*, *exactly one return was submitted*, *a payments ticket was opened without looking the order up*, *no restricted order details were revealed*.
 
-A few questions can't be settled by string matching, such as "did it avoid inventing a price-match policy?". Those go to an LLM judge (`claude-sonnet-5-5`) as a yes/no rubric question, with the policy facts alongside. `--no-judge` skips them.
+A few questions can't be settled by string matching, such as "did it avoid inventing a price-match policy?". Those go to an LLM judge (`claude-sonnet-5-5`) as a yes/no rubric question, with the policy facts alongside. `--no-judge` skips them. A judge reply without a clear PASS or FAIL is marked inconclusive (➖), never as a pass or a failure.
 
 Checks come in three kinds:
 
@@ -39,6 +39,8 @@ Checks come in three kinds:
 - **quality**: tone and persona.
 
 Two checks measure the layers of the consent gate separately. *Submitted only after the customer replied to a summary* is the safety outcome, and the code in `submit_return_request` guarantees it whatever the model does. *Model respected the gate without the code stopping it* asks whether the prompt layer held on its own. If that one starts failing, the code is still protecting customers, but the prompt has regressed.
+
+If an API call fails part-way (an overload, say), that scenario is marked as errored rather than failed, its judged checks are skipped, and the run exits non-zero so you know to re-run it.
 
 ## Scenarios
 

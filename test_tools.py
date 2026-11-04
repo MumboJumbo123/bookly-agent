@@ -16,12 +16,20 @@ RETURN = dict(
 )
 
 
-def proposed(*customer_messages: str) -> tuple[Session, str]:
-    """A session where the customer sent these messages, then the agent prepared a return."""
+def say(session: Session, text: str) -> None:
+    """Record something the agent said to the customer."""
+    session.history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+
+
+def proposed(*customer_messages: str, show: bool = True) -> tuple[Session, str]:
+    """A session where the customer sent these messages, then the agent prepared
+    a return and (by default) showed the customer its summary."""
     s = Session()
     for msg in customer_messages:
         s.add_customer_message(msg)
     result = prepare_return(**RETURN, session=s)
+    if show:
+        say(s, result["summary"] + " Shall I go ahead and submit the return?")
     return s, result["proposal_id"]
 
 
@@ -45,6 +53,17 @@ def test_negated_consent_does_not_pass():
         assert not _is_consent_phrase(msg), msg
 
 
+def test_questions_and_conditions_are_not_consent():
+    for msg in ["Is that correct?", "Ok, and when does the label arrive?",
+                "Can I confirm the refund goes to my Visa?", "Sure, but swap it for Deep Work"]:
+        assert not _is_consent_phrase(msg), msg
+
+
+def test_harmless_phrases_with_negation_words_still_count():
+    for msg in ["Yes, go ahead, no rush", "Yep, no worries"]:
+        assert _is_consent_phrase(msg), msg
+
+
 # --- prepare_return ---------------------------------------------------------
 
 def test_prepare_works_out_the_refund_in_code():
@@ -60,6 +79,19 @@ def test_prepare_refunds_both_items_when_asked():
     s.add_customer_message("return both please")
     result = prepare_return(**{**RETURN, "items": ["Atomic Habits", "Deep Work"]}, session=s)
     assert result["refund_gbp"] == 22.98
+
+
+def test_prepare_rejects_vague_item_names():
+    # "a" appears in both titles; a request must pick out one item.
+    result = prepare_return(**{**RETURN, "items": ["a"]}, session=Session())
+    assert result["error"] == "Items not found on this order"
+
+
+def test_cannot_return_the_same_item_twice():
+    s, pid = proposed("Return Atomic Habits")
+    s.add_customer_message("yes")
+    submit_return_request(pid, "yes", session=s)
+    assert prepare_return(**RETURN, session=s)["error"] == "Already returned in this conversation"
 
 
 def test_prepare_rejects_items_not_on_the_order():
@@ -86,7 +118,7 @@ def test_happy_path_submits():
     s.add_customer_message("Yes go ahead please")
     result = submit_return_request(pid, "Yes, go ahead", session=s)
     assert result["success"] is True
-    assert result["return_reference"] == "RTN-840949"  # seeded by order ID
+    assert result["return_reference"] == "RTN-189065"  # seeded by order + items
     assert result["refund_gbp"] == 11.99
 
 
@@ -131,6 +163,25 @@ def test_rejects_a_superseded_proposal():
     result = submit_return_request(old, "yes", session=s)
     assert result["error"] == "consent_gate_violation"
     assert "replaced" in result["detail"]
+
+
+def test_rejects_a_summary_the_customer_was_never_shown():
+    # The agent prepared a return but asked something else; "Yes please" isn't
+    # consent to a refund the customer hasn't seen.
+    s, pid = proposed("Return Atomic Habits", show=False)
+    say(s, "Would you like the label emailed to you?")
+    s.add_customer_message("Yes please")
+    result = submit_return_request(pid, "Yes please", session=s)
+    assert result["reason"] == "not_shown"
+
+
+def test_rejects_when_two_summaries_were_prepared_before_the_reply():
+    # RP-1 (£11.99) was shown, RP-2 (£22.98) prepared silently in the same turn.
+    s, first = proposed("Return Atomic Habits")
+    second = prepare_return(**{**RETURN, "items": ["Atomic Habits", "Deep Work"]}, session=s)
+    s.add_customer_message("Yes, go ahead")
+    result = submit_return_request(second["proposal_id"], "Yes, go ahead", session=s)
+    assert result["reason"] == "ambiguous"
 
 
 def test_rejects_unknown_proposal():
@@ -192,6 +243,23 @@ def test_escalation_returns_ticket_with_handoff_context():
     assert result["ticket_id"].startswith("ESC-")
     assert result["queue"] == "Payments team"
     assert result["handoff"]["summary"] == "Customer charged twice for BK-55210."
+
+
+
+# --- Agent loop ------------------------------------------------------------
+
+def test_refusal_does_not_leave_an_empty_turn_in_history():
+    from agent import run_agent_turn
+    from evals.fakes import ScriptedClient, response
+    client = ScriptedClient(agent=[response(stop_reason="refusal")])
+    s = Session()
+    s.add_customer_message("something the model declines")
+    events = []
+    run_agent_turn(client, s, lambda kind, **d: events.append((kind, d)))
+    last = s.history[-1]
+    assert last["role"] == "assistant" and last["content"][0]["text"].startswith("I can't help")
+    assert all(m["content"] for m in s.history)
+    assert events[-1][1].get("scripted") is True
 
 
 if __name__ == "__main__":
