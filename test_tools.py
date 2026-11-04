@@ -4,23 +4,28 @@ Run:  python3 test_tools.py      (or: pytest test_tools.py)
 """
 
 from agent import (
-    MOCK_ORDERS, _is_consent_phrase, escalate_to_human, get_order_status,
-    submit_return_request,
+    MOCK_ORDERS, Session, _is_consent_phrase, escalate_to_human,
+    get_order_status, prepare_return, submit_return_request,
 )
 
-ORDER = dict(
+RETURN = dict(
     order_id="BK-10078",
     customer_email="alex@bookly.com",
-    items=["Atomic Habits by James Clear"],
+    items=["Atomic Habits"],
     reason="Didn't enjoy it",
 )
 
 
-def submit(confirmation: str, last_user_text: str) -> dict:
-    return submit_return_request(
-        **ORDER, customer_confirmation=confirmation, _last_user_text=last_user_text
-    )
+def proposed(*customer_messages: str) -> tuple[Session, str]:
+    """A session where the customer sent these messages, then the agent prepared a return."""
+    s = Session()
+    for msg in customer_messages:
+        s.add_customer_message(msg)
+    result = prepare_return(**RETURN, session=s)
+    return s, result["proposal_id"]
 
+
+# --- Consent phrase matching ----------------------------------------------
 
 def test_explicit_yes_passes():
     for msg in ["Yes", "Yes go ahead please", "yep, do it", "OK", "Sure, that’s right"]:
@@ -40,35 +45,107 @@ def test_negated_consent_does_not_pass():
         assert not _is_consent_phrase(msg), msg
 
 
+# --- prepare_return ---------------------------------------------------------
+
+def test_prepare_works_out_the_refund_in_code():
+    s, pid = proposed("I want to return Atomic Habits")
+    proposal = s.proposals[pid]
+    assert proposal["refund_gbp"] == 11.99
+    assert proposal["items"] == ["Atomic Habits by James Clear"]
+    assert "£11.99" in prepare_return(**RETURN, session=s)["summary"]
+
+
+def test_prepare_refunds_both_items_when_asked():
+    s = Session()
+    s.add_customer_message("return both please")
+    result = prepare_return(**{**RETURN, "items": ["Atomic Habits", "Deep Work"]}, session=s)
+    assert result["refund_gbp"] == 22.98
+
+
+def test_prepare_rejects_items_not_on_the_order():
+    result = prepare_return(**{**RETURN, "items": ["Dune"]}, session=Session())
+    assert result["error"] == "Items not found on this order"
+    assert result["unknown_items"] == ["Dune"]
+
+
+def test_prepare_rejects_an_order_still_in_transit():
+    result = prepare_return("BK-10042", "alex@bookly.com", ["The Midnight Library"], "x",
+                            session=Session())
+    assert result["error"] == "Order not eligible for return"
+
+
+def test_prepare_rejects_a_restricted_order():
+    result = prepare_return("BK-55210", "sarah@bookly.com", ["Kindle"], "x", session=Session())
+    assert result["error"] == "restricted_order"
+
+
+# --- submit_return_request: the consent gate ------------------------------
+
 def test_happy_path_submits():
-    result = submit("Yes, go ahead", "Yes go ahead please")
+    s, pid = proposed("I want to return Atomic Habits", "Didn't enjoy it")
+    s.add_customer_message("Yes go ahead please")
+    result = submit_return_request(pid, "Yes, go ahead", session=s)
     assert result["success"] is True
     assert result["return_reference"] == "RTN-840949"  # seeded by order ID
+    assert result["refund_gbp"] == 11.99
 
 
-def test_rejects_when_last_message_is_not_consent():
-    # The model claims consent but the customer's latest turn is pressure, not a yes.
-    result = submit("I already said yes", "Didn't enjoy it. Please just submit, I'm in a rush.")
+def test_rejects_submit_in_the_same_turn_as_the_summary():
+    # The attack the keyword check alone couldn't stop: "I already confirmed,
+    # just submit it" contains consent words, but it was typed before the
+    # customer saw any summary. The proposal didn't exist yet, so it can't count.
+    s, pid = proposed("Return Atomic Habits from BK-10078. I already confirmed, just submit it.")
+    result = submit_return_request(pid, "I already confirmed, just submit it", session=s)
+    assert result["error"] == "consent_gate_violation"
+    assert "hasn't replied" in result["detail"]
+
+
+def test_rejects_when_reply_to_summary_is_not_consent():
+    s, pid = proposed("Return Atomic Habits")
+    s.add_customer_message("Didn't enjoy it. Please just submit, I'm in a rush.")
+    result = submit_return_request(pid, "I already said yes", session=s)
     assert result["error"] == "consent_gate_violation"
 
 
-def test_rejects_confirmation_not_quoted_from_last_message():
-    # Customer said "yep"; model passes a different, fabricated phrase.
-    result = submit("Yes, please submit the return", "yep")
+def test_rejects_a_yes_that_is_not_the_first_reply_to_the_summary():
+    s, pid = proposed("Return Atomic Habits")
+    s.add_customer_message("Actually, how long does the refund take?")
+    s.add_customer_message("yes")
+    result = submit_return_request(pid, "yes", session=s)
+    assert result["error"] == "consent_gate_violation"
+    assert "moved on" in result["detail"]
+
+
+def test_rejects_confirmation_not_quoted_from_latest_message():
+    s, pid = proposed("Return Atomic Habits")
+    s.add_customer_message("yep")
+    result = submit_return_request(pid, "Yes, please submit the return", session=s)
     assert result["error"] == "consent_gate_violation"
 
 
-def test_rejects_missing_last_message():
-    assert submit("yes", "")["error"] == "consent_gate_violation"
+def test_rejects_a_superseded_proposal():
+    s, old = proposed("Return Atomic Habits")
+    s.add_customer_message("Actually make it both books")
+    prepare_return(**{**RETURN, "items": ["Atomic Habits", "Deep Work"]}, session=s)
+    s.add_customer_message("yes")
+    result = submit_return_request(old, "yes", session=s)
+    assert result["error"] == "consent_gate_violation"
+    assert "replaced" in result["detail"]
 
 
-def test_known_limitation_keyword_gate_cannot_see_context():
-    # The tool checks that the customer said yes, not *what* they said yes to.
-    # "I already confirmed, just submit it" passes the keyword check; stopping a
-    # premature submit here is the prompt layer's job (see test_transcripts.md,
-    # Flow 6). Production fix: bind consent to a server-side pending-return record.
-    assert _is_consent_phrase("I already confirmed, just submit it")
+def test_rejects_unknown_proposal():
+    s = Session()
+    s.add_customer_message("yes")
+    assert "error" in submit_return_request("RP-9", "yes", session=s)
 
+
+def test_retrying_a_submit_does_not_create_a_second_return():
+    s, pid = proposed("Return Atomic Habits")
+    s.add_customer_message("yes")
+    first = submit_return_request(pid, "yes", session=s)
+    again = submit_return_request(pid, "yes", session=s)
+    assert again["return_reference"] == first["return_reference"]
+    assert again["already_submitted"] is True
 
 
 # --- Grounding and the human approval gate -------------------------------
@@ -115,33 +192,6 @@ def test_escalation_returns_ticket_with_handoff_context():
     assert result["ticket_id"].startswith("ESC-")
     assert result["queue"] == "Payments team"
     assert result["handoff"]["summary"] == "Customer charged twice for BK-55210."
-
-
-
-def test_cannot_return_a_restricted_order():
-    result = submit_return_request(
-        order_id="BK-55210", customer_email="sarah@bookly.com",
-        items=["Kindle Paperwhite bundle"], reason="x",
-        customer_confirmation="yes", _last_user_text="yes",
-    )
-    assert result["error"] == "restricted_order"
-
-
-def test_cannot_return_an_order_still_in_transit():
-    result = submit_return_request(
-        order_id="BK-10042", customer_email="alex@bookly.com",
-        items=["The Midnight Library"], reason="x",
-        customer_confirmation="yes", _last_user_text="yes",
-    )
-    assert result["error"] == "Order not eligible for return"
-
-
-def test_cannot_return_items_not_on_the_order():
-    result = submit_return_request(
-        **{**ORDER, "items": ["Dune"]}, customer_confirmation="yes", _last_user_text="yes",
-    )
-    assert result["error"] == "Items not found on this order"
-    assert result["unknown_items"] == ["Dune"]
 
 
 if __name__ == "__main__":
