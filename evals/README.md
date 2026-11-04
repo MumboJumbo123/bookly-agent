@@ -70,4 +70,4 @@ The runner prices the agent's own token usage (input, output, cache writes and r
 
 ## Testing the harness itself
 
-`python3 evals/test_harness.py` runs the harness end to end against a scripted fake client ([`fakes.py`](fakes.py)), with no API key. The tests prove the checks catch what they should: an agent that rushes the submit, an invented reference number, a leaked restricted order. Fake output is never written into the published transcripts.
+`python3 evals/test_harness.py` runs the harness end to end against a scripted fake client ([`fakes.py`](fakes.py)), with no API key. The tests check both directions. A scripted well-behaved agent passes every check in every scenario, so no check is too brittle. And the checks catch what they should: an agent that rushes the submit, an invented reference number, a leaked restricted order. Fake output is never written into the published transcripts.
