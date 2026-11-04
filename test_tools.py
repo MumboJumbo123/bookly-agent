@@ -79,9 +79,11 @@ def test_order_status_hides_internal_fields():
     assert "customer_email" not in result
 
 
-def test_wrong_email_reveals_nothing():
-    result = get_order_status("BK-10042", "wrong@test.com")
-    assert result == {"error": "Email does not match order records"}
+def test_wrong_email_and_unknown_order_look_the_same():
+    # Same error either way, so the tool can't be used to discover order IDs.
+    wrong_email = get_order_status("BK-10042", "wrong@test.com")
+    unknown_order = get_order_status("BK-99999", "alex@bookly.com")
+    assert wrong_email == unknown_order == {"error": "No order found for that order ID and email"}
 
 
 def test_payment_dispute_order_is_restricted():
@@ -113,6 +115,33 @@ def test_escalation_returns_ticket_with_handoff_context():
     assert result["ticket_id"].startswith("ESC-")
     assert result["queue"] == "Payments team"
     assert result["handoff"]["summary"] == "Customer charged twice for BK-55210."
+
+
+
+def test_cannot_return_a_restricted_order():
+    result = submit_return_request(
+        order_id="BK-55210", customer_email="sarah@bookly.com",
+        items=["Kindle Paperwhite bundle"], reason="x",
+        customer_confirmation="yes", _last_user_text="yes",
+    )
+    assert result["error"] == "restricted_order"
+
+
+def test_cannot_return_an_order_still_in_transit():
+    result = submit_return_request(
+        order_id="BK-10042", customer_email="alex@bookly.com",
+        items=["The Midnight Library"], reason="x",
+        customer_confirmation="yes", _last_user_text="yes",
+    )
+    assert result["error"] == "Order not eligible for return"
+
+
+def test_cannot_return_items_not_on_the_order():
+    result = submit_return_request(
+        **{**ORDER, "items": ["Dune"]}, customer_confirmation="yes", _last_user_text="yes",
+    )
+    assert result["error"] == "Items not found on this order"
+    assert result["unknown_items"] == ["Dune"]
 
 
 if __name__ == "__main__":

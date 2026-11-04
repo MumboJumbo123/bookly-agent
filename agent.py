@@ -44,7 +44,8 @@ MOCK_ORDERS = {
         "carrier": "Royal Mail",
         "tracking_number": "RM493821746GB",
         "estimated_delivery": "Tomorrow by 6pm",
-        "eligible_for_return": True,
+        "eligible_for_return": False,
+        "ineligibility_reason": "Order is still in transit — a return can be started once it's delivered.",
     },
     "BK-10078": {
         "customer_email": "alex@bookly.com",
@@ -81,11 +82,10 @@ MOCK_ORDERS = {
 
 def _verify_order(order_id: str, customer_email: str):
     """Look up order and verify email. Returns (order_dict, error_dict)."""
-    order = MOCK_ORDERS.get(order_id)
-    if order is None:
-        return None, {"error": "Order not found", "order_id": order_id}
-    if order["customer_email"].strip().lower() != customer_email.strip().lower():
-        return None, {"error": "Email does not match order records"}
+    order = MOCK_ORDERS.get(order_id.strip().upper())
+    # One error for both cases, so a caller can't probe which order IDs exist.
+    if order is None or order["customer_email"].strip().lower() != customer_email.strip().lower():
+        return None, {"error": "No order found for that order ID and email"}
     return order, None
 
 
@@ -234,11 +234,20 @@ def submit_return_request(
     order, err = _verify_order(order_id, customer_email)
     if err:
         return err
+    restricted = _restricted_reason(order)
+    if restricted:
+        return {"error": "restricted_order", "category": restricted,
+                "detail": "Returns on this order need a human specialist. Escalate."}
     if not order.get("eligible_for_return"):
         return {
             "error": "Order not eligible for return",
             "reason": order.get("ineligibility_reason", "Unknown"),
         }
+    titles = [i["title"].lower() for i in order["items"]]
+    unknown = [it for it in items if not any(it.strip().lower() in t for t in titles)]
+    if not items or unknown:
+        return {"error": "Items not found on this order", "unknown_items": unknown,
+                "order_items": [i["title"] for i in order["items"]]}
     ref = f"RTN-{random.Random(order_id).randint(100000, 999999)}"
     return {
         "success": True,
@@ -255,7 +264,7 @@ TOOL_DISPATCH = {
 }
 
 
-def _last_user_text(history: list[dict]) -> str:
+def _latest_customer_message(history: list[dict]) -> str:
     """Most recent user message text, skipping tool_result turns."""
     for msg in reversed(history):
         if msg.get("role") != "user":
@@ -391,7 +400,7 @@ If ineligible: explain specifically why, offer human handoff if there's an exten
 ## AOP-03 — Policy Q&A
 Trigger: question about shipping, returns policy, membership, payment methods, account.
 Policy facts (ground truth — do not deviate):
-- Returns: 30 days from delivery, unused, original packaging. Damaged/incorrect items: no time limit. Refunds: 5 business days to original payment method. Digital products non-returnable once downloaded.
+- Returns: 30 days from delivery, unused, original packaging. Damaged/incorrect items: no time limit. Refunds: 5 business days after we receive the item, to the original payment method. Drop-off: print the prepaid label and take the parcel to any Post Office. Digital products non-returnable once downloaded.
 - Shipping: standard 3–5 days, free over £20 else £2.99. Express next day if ordered before 2pm, £4.99. EU from £6.99, 5–10 days. Click & Collect free, 2,400+ UK locations.
 - Bookly Prime: £7.99/month or £79/year. Free express delivery, early sale access, 10% member pricing. Cancel anytime.
 - Password reset: bookly.com/reset.
@@ -450,11 +459,11 @@ def run_agent_turn(client: anthropic.Anthropic, history: list[dict]) -> None:
             print("We're very busy right now. Please try again shortly.")
             return
         except anthropic.APIStatusError as e:
-            print("Something went wrong on my end. I'll connect you to a human agent.")
+            print("Sorry, something went wrong on my end. Please try again in a moment.")
             print(_dim(f"[API error {e.status_code}: {e.message}]"), file=sys.stderr)
             return
         except Exception:
-            print("An unexpected error occurred. Let me connect you to a human agent.")
+            print("Sorry, something unexpected went wrong. Please try again in a moment.")
             traceback.print_exc(file=sys.stderr)
             return
 
@@ -484,21 +493,25 @@ def run_agent_turn(client: anthropic.Anthropic, history: list[dict]) -> None:
                 print(_dim(f"  [tool: {name}({json.dumps(args, ensure_ascii=False)})]"))
 
                 fn = TOOL_DISPATCH.get(name)
-                if fn:
-                    if name == "submit_return_request":
+                try:
+                    if fn is None:
+                        result = {"error": f"Unknown tool: {name}"}
+                    elif name == "submit_return_request":
                         # Inject the customer's most recent conversational
                         # message so the consent gate can verify it.
-                        result = fn(**args, _last_user_text=_last_user_text(history))
+                        result = fn(**args, _last_user_text=_latest_customer_message(history))
                     else:
                         result = fn(**args)
-                else:
-                    result = {"error": f"Unknown tool: {name}"}
+                except Exception as e:  # bad arguments from the model
+                    result = {"error": f"Tool call failed: {type(e).__name__}: {e}"}
+                is_error = "error" in result
 
                 print(_dim(f"  [result: {json.dumps(result, ensure_ascii=False)}]"))
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_block.id,
                     "content": json.dumps(result),
+                    "is_error": is_error,
                 })
 
             history.append({"role": "user", "content": tool_results})
@@ -507,15 +520,15 @@ def run_agent_turn(client: anthropic.Anthropic, history: list[dict]) -> None:
         # Unexpected stop reason — append and return
         history.append({"role": "assistant", "content": assistant_content})
         if response.stop_reason == "refusal":
-            print(f"\n{_bold('Bea:')} I can't help with that one here. "
-                  "Let me connect you with a human agent.")
+            print(f"\n{_bold('Bea:')} I can't help with that one here, but I can "
+                  "pass it to a human specialist if you'd like.")
         elif not text_blocks:
             print(_dim(f"  [stopped: {response.stop_reason}]"))
         return
 
     # Hit max iterations
     print(f"\n{_bold('Bea:')} I've been going back and forth a bit too much here. "
-          "Let me connect you with a human agent who can help directly.")
+          "Would you like me to pass this to a human specialist?")
 
 
 # ---------------------------------------------------------------------------
